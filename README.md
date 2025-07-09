@@ -29,6 +29,8 @@ To install runpod-mcp for Claude Desktop automatically via [Smithery](https://sm
 npx -y @smithery/cli install @runpod/runpod-mcp --client claude
 ```
 
+> **Note**: If the above command doesn't work due to the recent repository name change, you may need to use the previous package name temporarily: `@runpod/runpod-mcp-ts`
+
 ### Installation
 
 1. Clone the repository
