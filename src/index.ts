@@ -6,6 +6,9 @@ import fetch, { type RequestInit as NodeFetchRequestInit } from 'node-fetch';
 // Base URL for RunPod API
 const API_BASE_URL = 'https://rest.runpod.io/v1';
 
+// GraphQL endpoint for infrastructure queries (GPU types, data centers)
+const GRAPHQL_URL = 'https://api.runpod.io/graphql';
+
 // Get API key from environment variable
 const API_KEY = process.env.RUNPOD_API_KEY;
 if (!API_KEY) {
@@ -64,6 +67,192 @@ async function runpodRequest(
     throw error;
   }
 }
+
+// Helper function to make GraphQL requests (for public infrastructure data)
+async function graphqlRequest<T>(query: string): Promise<T> {
+  const response = await fetch(GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`GraphQL Error: ${response.status} - ${errorText}`);
+  }
+
+  const result = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };
+
+  if (result.errors && result.errors.length > 0) {
+    throw new Error(`GraphQL Error: ${result.errors.map((e) => e.message).join(', ')}`);
+  }
+
+  if (!result.data) {
+    throw new Error('No data returned from GraphQL query');
+  }
+
+  return result.data;
+}
+
+// ============== INFRASTRUCTURE TOOLS ==============
+
+// List GPU Types
+server.tool(
+  'list-gpu-types',
+  {
+    minMemoryGb: z
+      .number()
+      .optional()
+      .describe('Filter to GPUs with at least this much VRAM in GB'),
+    secureCloudOnly: z
+      .boolean()
+      .optional()
+      .describe('Filter to only GPUs available in secure cloud'),
+    communityCloudOnly: z
+      .boolean()
+      .optional()
+      .describe('Filter to only GPUs available in community cloud'),
+    searchTerm: z
+      .string()
+      .optional()
+      .describe("Search term to filter GPUs by name (e.g., 'A100', 'RTX 4090')"),
+  },
+  async (params) => {
+    const query = `
+      query {
+        gpuTypes {
+          id
+          displayName
+          memoryInGb
+          secureCloud
+          communityCloud
+        }
+      }
+    `;
+
+    interface GpuType {
+      id: string;
+      displayName: string;
+      memoryInGb: number;
+      secureCloud: boolean;
+      communityCloud: boolean;
+    }
+
+    const data = await graphqlRequest<{ gpuTypes: GpuType[] }>(query);
+    let gpuTypes = data.gpuTypes.filter((gpu) => gpu.id !== 'unknown');
+
+    // Apply filters
+    if (params.minMemoryGb) {
+      gpuTypes = gpuTypes.filter((gpu) => gpu.memoryInGb >= params.minMemoryGb!);
+    }
+    if (params.secureCloudOnly) {
+      gpuTypes = gpuTypes.filter((gpu) => gpu.secureCloud);
+    }
+    if (params.communityCloudOnly) {
+      gpuTypes = gpuTypes.filter((gpu) => gpu.communityCloud);
+    }
+    if (params.searchTerm) {
+      const term = params.searchTerm.toLowerCase();
+      gpuTypes = gpuTypes.filter(
+        (gpu) =>
+          gpu.id.toLowerCase().includes(term) ||
+          gpu.displayName.toLowerCase().includes(term)
+      );
+    }
+
+    // Sort by memory descending
+    gpuTypes.sort((a, b) => b.memoryInGb - a.memoryInGb);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              count: gpuTypes.length,
+              gpuTypes: gpuTypes.map((gpu) => ({
+                id: gpu.id,
+                displayName: gpu.displayName,
+                memoryGb: gpu.memoryInGb,
+                secureCloud: gpu.secureCloud,
+                communityCloud: gpu.communityCloud,
+              })),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+// List Data Centers
+server.tool(
+  'list-data-centers',
+  {
+    region: z
+      .string()
+      .optional()
+      .describe("Filter by region/location (e.g., 'United States', 'Europe', 'Canada')"),
+  },
+  async (params) => {
+    const query = `
+      query {
+        dataCenters {
+          id
+          name
+          location
+        }
+      }
+    `;
+
+    interface DataCenter {
+      id: string;
+      name: string;
+      location: string;
+    }
+
+    const data = await graphqlRequest<{ dataCenters: DataCenter[] }>(query);
+    let dataCenters = data.dataCenters;
+
+    // Apply region filter
+    if (params.region) {
+      const term = params.region.toLowerCase();
+      dataCenters = dataCenters.filter((dc) =>
+        dc.location.toLowerCase().includes(term)
+      );
+    }
+
+    // Group by location for convenience
+    const byLocation: Record<string, string[]> = {};
+    for (const dc of dataCenters) {
+      if (!byLocation[dc.location]) {
+        byLocation[dc.location] = [];
+      }
+      byLocation[dc.location].push(dc.id);
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              count: dataCenters.length,
+              dataCenters,
+              byLocation,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
 
 // ============== POD MANAGEMENT TOOLS ==============
 
